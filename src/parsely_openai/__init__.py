@@ -14,3 +14,18 @@ except PackageNotFoundError:  # pragma: no cover
     __version__ = "unknown"
 finally:
     del version, PackageNotFoundError
+
+from .api import (
+    fetch_tools,
+    create_assistant,
+    OpenAIThread,
+    OpenAIChat
+)
+
+__all__ = [
+    "__version__",
+    "fetch_tools",
+    "create_assistant",
+    "OpenAIThread",
+    "OpenAIChat"
+]
