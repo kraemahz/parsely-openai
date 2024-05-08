@@ -36,27 +36,40 @@ class OpenAIThread:
     """Run using the OpenAI beta threads API"""
 
     POLL_RATE = 1.0
+    LIMIT = 100
 
     def __init__(
-        self, client, assistant_id, initial_prompt, files_attached=None, file_cache=None
+        self,
+        client,
+        assistant_id,
+        initial_prompt=None,
+        files_attached=None,
+        file_cache=None,
+        thread_id=None,
     ):
         self.client = client
         self.assistant_id = assistant_id
-        self.prompt = initial_prompt
         self.files_attached = files_attached
         self.file_cache = {} if file_cache is None else file_cache
 
-        thread = self.client.beta.threads.create()
-        self.thread_id = thread.id
+        if thread_id is None:
+            thread = self.client.beta.threads.create()
+            self.thread_id = thread.id
+        else:
+            self.thread_id = thread_id
         self.last_message = None
+        self.last_seen_message = None
         self.last_time_failed = None
         self.n_restarts = 0
 
-        self._start_messages()
+        if thread_id is None:
+            if initial_prompt is None:
+                raise ValueError("Initial prompt must be given for new thread")
+            self._start_messages(initial_prompt)
 
         _logger.info("Thread: %s", self.thread_id)
 
-    def _start_messages(self):
+    def _start_messages(self, prompt):
         file_ids = []
         if self.files_attached:
             for path in self.files_attached:
@@ -71,27 +84,35 @@ class OpenAIThread:
                 self.file_cache[path] = file_obj.id
 
         self.client.beta.threads.messages.create(
-            self.thread_id, role="user", content=self.prompt, file_ids=file_ids
+            self.thread_id, role="user", content=prompt, file_ids=file_ids
         )
 
-    def messages(self, limit=100):
+    @property
+    def messages(self):
         messages = []
-        after = self.last_message
 
-        while True:
-            response = self.client.beta.threads.messages.list(
-                thread_id=self.thread_id, limit=limit, after=after, order="asc"
-            )
-            for item in response.data:
-                after = item.id
-                text = "\n".join([content.text.value for content in item.content])
+        response = self.client.beta.threads.messages.list(
+            thread_id=self.thread_id,
+            limit=self.LIMIT,
+            after=self.last_message,
+            order="asc"
+        )
+        id = self.last_seen_message
+        for item in response.data:
+            id = item.id
+            if item.role == "assistant":
+                text = "\n".join([content.text.value
+                                  for content in item.content])
                 messages.append((item.role, text))
+        self.last_seen_message = id
 
-            if len(response.data) < limit:
-                break
-
-        self.last_message = after
         return messages
+
+    def add_chat(self, message: str):
+        msg = self.client.beta.threads.messages.create(
+            self.thread_id, role="user", content=message
+        )
+        self.last_message = msg.id
 
     def cleanup_files(self):
         file_ids = [self.file_cache.pop(key)
@@ -101,7 +122,9 @@ class OpenAIThread:
 
     def send_messages(self, tool_provider):
         if hasattr(tool_provider, "send_messages"):
-            tool_provider.send_messages(self.messages())
+            messages = self.messages
+            tool_provider.send_messages(self.messages)
+            self.last_message = self.last_seen_message
 
     def handle_tool_call(self, run, tool_provider, responses: List):
         self.last_time_failed = None
@@ -206,11 +229,6 @@ class OpenAIThread:
         self.last_time_failed = f"Run failed due to {run.last_error}"
         return self.submit_thread()
 
-    def add_chat(self, message: str):
-        self.client.beta.threads.messages.create(
-            self.thread_id, role="user", content=message
-        )
-
     def run(self, tool_provider):
         """Runs the thread until complete"""
         run = self.submit_thread()
@@ -249,7 +267,7 @@ class OpenAIThread:
                 self.send_messages(tool_provider)
             time.sleep(self.POLL_RATE)
 
-        if tool_provider:
+        if hasattr(tool_provider, 'complete'):
             tool_provider.complete("Task complete")
         _logger.info("Complete")
 
