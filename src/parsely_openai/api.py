@@ -99,11 +99,14 @@ class OpenAIThread:
         )
         id = self.last_seen_message
         for item in response.data:
-            id = item.id
             if item.role == "assistant":
                 text = "\n".join([content.text.value
                                   for content in item.content])
-                messages.append((item.role, text))
+                if not text:
+                    _logger.warn("Empty message: %s", item)
+                else:
+                    id = item.id
+                    messages.append((item.role, text))
         self.last_seen_message = id
 
         return messages
